@@ -18,7 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "i2c.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -40,6 +42,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define FTRIM(val, min, max) fmax(min, fmin(max, val))
 
 /* USER CODE END PD */
 
@@ -135,7 +138,50 @@ void LCD_SendString(char *str) {
   }
 }
 
+void LCD_SendTopString(char *str) {
+  LCD_SendCommand(0x80 | 0x00);
+  LCD_SendString(str);
+}
 
+void LCD_SendBottomString(char *str) {
+  LCD_SendCommand(0x80 | 0x40);
+  LCD_SendString(str);
+}
+
+void LCD_Clean()
+{
+  char *str = "                ";
+  LCD_SendTopString(str);
+  LCD_SendBottomString(str);
+}
+
+volatile uint8_t tacho_events1 = 0;
+volatile uint8_t tacho_events2 = 0;
+volatile uint8_t tacho_events3 = 0;
+volatile uint8_t tacho_events4 = 0;
+
+volatile uint8_t tacho_events_per_period1 = 0;
+volatile uint8_t tacho_events_per_period2 = 0;
+volatile uint8_t tacho_events_per_period3 = 0;
+volatile uint8_t tacho_events_per_period4 = 0;
+
+float temp1 = 0;
+float temp2 = 0;
+float temp3 = 0;
+
+void update_temperature() {
+  get_Temperature();
+  temp1 = FTRIM(Temp[0], 0.0, 99.9),
+  temp2 = FTRIM(Temp[1], 0.0, 99.9),
+  temp3 = FTRIM(Temp[2], 0.0, 99.9);
+  Temp[0] = 0; Temp[1] = 0; Temp[2] = 0;
+}
+
+void display_temperature() {
+  char buffer[17];
+  sprintf(buffer, "%04.1f %04.1f %04.1f\1C", temp1, temp2, temp3);
+  LCD_SendTopString(buffer);
+}
 
 /* USER CODE END 0 */
 
@@ -147,7 +193,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  uint8_t blink = 0;
 
   /* USER CODE END 1 */
 
@@ -172,60 +217,43 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_ADC1_Init();
+  MX_TIM3_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
+  HAL_TIM_Base_Start_IT(&htim2);
+
   LCD_Init();
+  LCD_SendTopString   ("          RAM OK");
+  LCD_SendBottomString("          ROM OK");
 
-  // set address to 0x00
-  LCD_SendCommand(0x80 | 0x00);
-  LCD_SendString(" Using 1602 LCD");
+  get_ROMid();
+  HAL_Delay(1000);
 
-  // set address to 0x40
-  LCD_SendCommand(0x80 | 0x40);
-  LCD_SendString("  over I2C boob");
-
-  // create 8 custom characters for the S-meter
-  for(uint8_t ch = 0; ch < 8; ch++) {
-    // set CGRAM Address
-    LCD_SendCommand(0b01000000 + (ch << 3));
-    for(uint8_t line = 0; line < 8; line++) {
-      if(ch >= (7-line)) {
-        LCD_SendData(0b00011111);
-      } else {
-        LCD_SendData(0b00000000);
-      }
-    }
-  }
-
-  LCD_SendCommand(0b11000000);
-  LCD_SendString(" ");
-  for(uint8_t ch = 0; ch < 8; ch++) {
-    LCD_SendData(ch);
-  }
-
-  char buffer[16];
-
-  //get_ROMid();
+  // create a custom character (CGRAM 1, offset 8)
+  LCD_SendCommand(0x40 + 8);
+  LCD_SendData(0b00001100);
+  LCD_SendData(0b00010010);
+  LCD_SendData(0b00010010);
+  LCD_SendData(0b00001100);
+  LCD_SendData(0b00000000);
+  LCD_SendData(0b00000000);
+  LCD_SendData(0b00000000);
+  LCD_SendData(0b00000000);
+  LCD_SendData(0b00000000);
+  LCD_Clean();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    get_ROMid();
-    get_Temperature();
-    printf("Temp: %f", Temp[0]);
-    HAL_Delay(2000);
-
-    if(! blink) {
-      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-    }
-    sprintf(buffer, "Hello %d\0", blink);
-    LCD_SendCommand(0x80 | 0x00);
-    LCD_SendString(buffer);
-    blink++;
-    HAL_Delay(1);
+  while (1) {
+    printf("Updating temp...\r\n");
+    update_temperature();
+    display_temperature();
+    printf("%d %d %d %d\r\n", tacho_events_per_period1, tacho_events_per_period2, tacho_events_per_period3, tacho_events_per_period4);
+    HAL_Delay(100);
 
     /* USER CODE END WHILE */
 
@@ -242,6 +270,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -271,9 +300,42 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if(GPIO_Pin == GPIO_PIN_3) {
+    tacho_events1++;
+  } else if(GPIO_Pin == GPIO_PIN_4) {
+    tacho_events2++;
+  } else if(GPIO_Pin == GPIO_PIN_5) {
+    tacho_events3++;
+  } else if(GPIO_Pin == GPIO_PIN_6) {
+    tacho_events4++;
+  }
+}
+
+volatile uint16_t secs = 0;
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  tacho_events_per_period1 = tacho_events1;
+  tacho_events1 = 0;
+  tacho_events_per_period2 = tacho_events2;
+  tacho_events2 = 0;
+  tacho_events_per_period3 = tacho_events3;
+  tacho_events3 = 0;
+  tacho_events_per_period4 = tacho_events4;
+  tacho_events4 = 0;
+}
 
 /* USER CODE END 4 */
 
